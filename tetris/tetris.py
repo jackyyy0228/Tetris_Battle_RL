@@ -60,10 +60,10 @@ class Tetris:
         self.change = False
         self.done = False
         self.prev_action = None
-        self.positions=[] #block position, used for drawing screen
         self.totalSent = 0
         self.totalCleared = 0
         self.step_cnt = 0
+        self.state_list_actions = None
         if self.is_display:
             self.display(reset=True)
         return self.get_state(self.grid)
@@ -77,6 +77,8 @@ class Tetris:
             return self.groupedAction(action)
         elif self.action_type == 'single': #haven't finished
             return self.singleAction(action)
+        elif self.action_type == 'oracle':
+            return self.oracleAction(action)
     def groupedAction(self,actionID):
         #actionID = 0~4*13+1(hold) = 53
         #rotate 0~3 times, left 0~6 times right 0~6 times
@@ -237,10 +239,12 @@ class Tetris:
         return ori_piece
         
         return
-    def check_tspin(self,piece):
+    def check_tspin(self,piece,is_oracle = False):
         piece_type = piece.piece_type()
         piece_index = piece._index()
         tspin_type = None
+        if is_oracle:
+            self.prev_action = 3
         if piece_type == 'T' and self.prev_action in [3,4]:
             n_grid = 0
             for x,y in [(0,1),(0,3),(2,1),(2,3)]:
@@ -275,13 +279,18 @@ class Tetris:
         b = self.nextlist[0]
         self.piece = Piece(b,b[0],4,-2)
         self.nextlist.remove(self.nextlist[0])
-    def check_end(self): # return the line sent
+    def check_end(self,is_oracle = False,oracle_piece = None): # return the line sent
         ##check tspin
-        tspin = self.check_tspin(self.piece)
-        self.grid = self.place_piece(self.grid,self.piece)
+        if not is_oracle:
+            self.grid = self.place_piece(self.grid,self.piece)
+            tspin = self.check_tspin(self.piece)
+            grid = self.grid
+        else:
+            grid = self.place_piece(self.grid,oracle_piece)
+            tspin = self.check_tspin(oracle_piece)
         ## check line cleared
         total_clear = 0
-        self.grid,total_clear = cal_lines(self.grid)
+        grid,total_clear = cal_lines(grid)
         sent = 0
         is_special = False
         if total_clear > 0:
@@ -305,19 +314,21 @@ class Tetris:
                         if self.b2b:
                             sent += clear_lines
                 is_special = True
-        if total_clear > 0:
-            self.combo += 1
-        else:
-            self.combo = 0
-        self.b2b = is_special
-        self.totalSent += sent
-        self.totalCleared += total_clear
+        if not is_oracle:
+            if total_clear > 0:
+                self.combo += 1
+            else:
+                self.combo = 0
+            self.b2b = is_special
+            self.totalSent += sent
+            self.totalCleared += total_clear
         ## check end game
         for x in range (4):
             for y in range (4):
                 if self.piece.block[x][y] > 0:
                     if self.piece.py+y < 0:
-                        self.done = True
+                        if not is_oracle:
+                            self.done = True
                         return 0,0
         return sent,total_clear
     def cal_fitness_reward(self):
@@ -364,7 +375,7 @@ class Tetris:
             for y in range(4):
                 if piece.block[x][y] > 0:
                     positions.append((piece.px+x,piece.py+y))
-                    sorted(positions, key=lambda pos: pos[1])
+        sorted(positions, key=lambda pos: pos[1]*200+pos[0])
         return positions
     def place_piece(self,grid,piece):
         temp_grid = copy.deepcopy(grid)
@@ -374,7 +385,7 @@ class Tetris:
                     if 10 > piece.px + x >= 0 and 20 > piece.py + y >=0:
                         temp_grid[piece.px + x][piece.py+y] = piece.block[x][y]
         return temp_grid
-    def get_state(self,grid): #[grid,nextlist[0]....,held]
+    def get_state(self,grid,modify_last_element = False): #[grid,nextlist[0]....,held]
         statelist=[]
         #temp_grid = self.place_piece(self.grid,self.piece)
         height = cal_height(grid)
@@ -386,9 +397,12 @@ class Tetris:
         templist = list(self.nextlist)
         templist.insert(0,self.piece.b)
         for idx,piece in enumerate(templist):
-            num = allpieces.index(piece)
-            X = np.zeros(len(allpieces) + 1)
-            X[num] = 1
+            if idx == 5 and modify_last_element:
+                X = np.full([7],1/7.0)
+            else:
+                num = allpieces.index(piece)
+                X = np.zeros(len(allpieces) + 1)
+                X[num] = 1
             if idx > 0:
                 Y = np.concatenate((Y,X))
             else:
@@ -401,45 +415,70 @@ class Tetris:
         self.screen.drawScreen(self.grid,self.piece.px,self.piece.py,hd_piece.px,
                                hd_piece.py,self.piece.block,self.held,self.nextlist,
                                positions,self.totalSent,self.step_cnt,reset=reset)
-    def all_possible_state(self): #bfs all possible move
-        record = self.bfs(self.piece)
+    def get_all_possible_state(self): #bfs all possible move
+        record = self.bfs(self.piece,False)
+        flag = False
         if self.held != zeropieces :
+            flag = True
             b = self.held
             piece = Piece(b,b[0],4,-2)
-            record_held = self.bfs(piece)
-            record = record + record_held 
+            record_held = self.bfs(piece,True)
         else:
             b = self.nextlist[0]
             piece = Piece(b,b[0],4,-2)
-            record_held = self.bfs(piece)
-            record = record + record_held
+            record_held = self.bfs(piece,True)
         state_list = []
-        for piece in record:
+        reward_list = []
+        self.state_list_actions = []
+        next_list,piece_list,piece_backup,held_backup = copy.deepcopy([self.nextlist,self.piecelist,self.piece,self.held]) #backup
+        self.newBlock()
+        for piece,actions in record:
             temp_grid = self.place_piece(self.grid,piece)
-            state_list.append(self.get_state(temp_grid))
-        return state_list
+            state_list.append(self.get_state(temp_grid,True))
+            reward_list.append(self.check_end(True,piece)[0])
+            self.state_list_actions.append(actions)
+        self.hold()
+        for piece,actions in record_held:
+            temp_grid = self.place_piece(self.grid,piece)
+            if flag :
+                state_list.append(self.get_state(temp_grid,False))
+            else:
+                state_list.append(self.get_state(temp_grid,True))
+            reward_list.append(self.check_end(True,piece)[0])
+            self.state_list_actions.append(actions)
+        self.nextlist,self.piecelist,self.piece,self.held = next_list,piece_list,piece_backup,held_backup #backup
+        return state_list,reward_list
     def test(self):
-        state_list = self.all_possible_state()
-        print(self.grid)
+        state_list,_ = self.all_possible_state()
         for grid,Y in state_list:
             for i in range(20):
                 for j in range(10):
                     self.grid[j][i] = grid[i][j][0]
                     print(grid[i][j][0],end='')
                 print()
-            print(self.grid)
-            #self.display()
+            self.display()
             import time
             time.sleep(1)
-
-    def bfs(self,piece):
+    def oracle_action(self,actionID):
+        if not self.state_list_actions:
+            print('Please call all_possible_state first')
+            exit()
+        actions = self.state_list_actions[actionID]
+        for action in actions:
+            state,reward,done,line_sent,line_cleared = self.singleAction(action)
+        return state,reward,done,line_sent,line_cleared
+    def bfs(self,piece,is_hold):
         start = piece.get_state() #(px,py,rotate_index)
         visited = set()
-        queue = [start]
-        record = []
+        record_visited = set() #(positions)
+        if is_hold:
+            queue = [(start,-1,6)] # (state,prev_idx,action)
+        else:
+            queue = [(start,-1,-1)] # (state,prev_idx,action)
+        record = [] #pieces
         idx = 0
         while idx < len(queue):
-            now_state = queue[idx]
+            now_state,_,_ = queue[idx]
             idx += 1
             if now_state in visited:
                 continue
@@ -460,10 +499,26 @@ class Tetris:
                     new_piece = self.hardDrop(now_piece)
                 next_state = new_piece.get_state()
                 if new_piece.is_final and next_state not in visited:
-                    record.append(new_piece)
-                    visited.add(next_state)
-                    continue
-                queue.append(next_state)
+                    positions = self.getPositions(new_piece)
+                    positions = tuple(positions)
+                    if positions not in record_visited :
+                        record_visited.add(positions)
+                        visited.add(next_state)
+                        actions = [actionID]
+                        now_idx = idx -1
+                        while True:
+                            #back trace
+                            _,prev_idx,action = queue[now_idx]
+                            actions.append(action)
+                            if prev_idx == -1:
+                                if action == 6:
+                                    actions.append(6)
+                                break
+                            now_idx = prev_idx
+                        actions.reverse() 
+                        record.append((new_piece,actions))
+                        continue
+                queue.append((next_state,idx-1,actionID))
         return record                
 
 def cal_lines(grid):
@@ -522,17 +577,16 @@ if __name__ == '__main__':
     T = Tetris(action_type = test,use_fitness = False,is_display = True)
     state = T.reset()
     if test == 'single':
-        actionlist = ['Right','Left','Down','Rotate','HardDrop','Hold']
+        actionlist = ['Right','Left','Down','Rotate','CounterRotate','HardDrop','Hold']
         print(actionlist)
         while True:
             actionID = input('key : ')
-            if actionID not in ['0','1','2','3','4','5']:
+            if actionID not in ['0','1','2','3','4','5','6']:
                 continue
             state,reward,done,_,_ = T.step(int(actionID))
             T.test()
-            print(T.cal_fitness(T.grid))
-            #T.draw()
-            print("Reward: " + str(reward))
+            #print(T.cal_fitness(T.grid))
+            #print("Reward: " + str(reward))
             if done:
                 print('Game Over.')
     else:
