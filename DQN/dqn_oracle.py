@@ -7,17 +7,13 @@ import tensorflow as tf
 import scipy as sp
 import scipy.stats
 
-if "../tetris/" not in sys.path:
-  sys.path.append("../tetris/")
+if "./tetris/" not in sys.path:
+  sys.path.append("./tetris/")
 
 from tetris import *
-from lib import plotting
 from collections import deque, namedtuple
 
-#env = gym.envs.make("Breakout-v0")
-env = Tetris(use_fitness=True,action_type='oracle')
-# Atari Actions: 0 (noop), 1 (fire), 2 (left) and 3 (right) are valid actions
-
+env = Tetris(use_fitness=False,action_type='oracle')
 
 class Estimator():
     """Q-Value Estimator neural network.
@@ -78,8 +74,8 @@ class Estimator():
         #self.action_predictions = tf.gather(tf.reshape(self.predictions, [-1]), gather_indices)
 
         # Calcualte the loss
-        self.logits = tf.squeeze(self.logits,squeeze_dims=[1],name='logits')
-        self.losses = tf.squared_difference(self.logits,self.values)
+        self.predictions = tf.squeeze(self.logits,squeeze_dims=[1],name='logits')
+        self.losses = tf.squared_difference(self.predictions,self.values)
         self.loss = tf.reduce_sum(self.losses,name='loss')
 
         # Optimizer Parameters from original paper
@@ -95,17 +91,17 @@ class Estimator():
 
     def predict(self, sess, s1,s2):
         """
-        Predicts action values.
+        Predicts V(s)
 
         Args:
           sess: Tensorflow session
           s: State input of shape [batch_size, 4, 160, 160, 3]
 
         Returns:
-          Tensor of shape [batch_size, NUM_VALID_ACTIONS] containing the estimated 
-          action values.
+          Tensor of shape [batch_size, 1] containing the estimated 
+          state values.
         """
-        return sess.run(self.values, { self.grid_states: s1,self.piece_states: s2 })
+        return sess.run(self.predictions, { self.grid_states: s1,self.piece_states: s2 })
 
     def update(self, sess, X1, X2, y):
         """
@@ -113,14 +109,14 @@ class Estimator():
 
         Args:
           sess: Tensorflow session object
-          s: State input of shape [batch_size, 4, 160, 160, 3]
-          a: Chosen actions of shape [batch_size]
+          X1: State input of shape [batch_size, 20, 10, 1]
+          X2: State inpuut of shape [batch_size, 45]
           y: Targets of shape [batch_size]
 
         Returns:
           The calculated loss on the batch
         """
-        feed_dict = { self.grid_states: X1, self.piece_states: X2, self.value: y}
+        feed_dict = { self.grid_states: X1, self.piece_states: X2, self.values: y}
         summaries, global_step, _, loss = sess.run(
             [self.summaries, tf.contrib.framework.get_global_step(), self.train_op, self.loss],
             feed_dict)
@@ -128,7 +124,7 @@ class Estimator():
             self.summary_writer.add_summary(summaries, global_step)
         return loss
 
-def make_epsilon_greedy_policy(estimator):
+def make_epsilon_greedy_policy(estimator,discount_factor):
     """
     Creates an epsilon-greedy policy based on all_possible_move
     Args:
@@ -140,14 +136,11 @@ def make_epsilon_greedy_policy(estimator):
         the probabilities for each action in the form of a numpy array of length nA.
 
     """
-    def policy_fn(sess, epsilon,discount_factor, env):
-        possible_states,rewards = env.get_all_possible_states()
-        nA = len(possible_states) 
+    def policy_fn(sess, possible_states1, possible_states2, rewards, epsilon):
+        nA = len(possible_states1) 
         A = np.ones(nA, dtype=float) * epsilon / nA
-        #q_values = estimator.predict(sess, np.expand_dims(observation, 0))[0]
-        values = estimator.predict(sess, np.expand_dims(possible_states[0],0),
-                                     np.expand_dims(possible_states[1],0))[0]
-        values = values *discount_factor + np.array(rewards)
+        values = estimator.predict(sess, possible_states1, possible_states2)[0]
+        values = values * discount_factor + np.array(rewards)
         best_action = np.argmax(values)
         A[best_action] += (1.0 - epsilon)
         return A
@@ -155,13 +148,14 @@ def make_epsilon_greedy_policy(estimator):
 
 
 def mean_confidence_interval(data, confidence=0.95):
-    a = 1.0*np.array(data)
+    a = 1.0 * np.array(data)
     n = len(a)
     m, se = np.mean(a), scipy.stats.sem(a)
     h = se * sp.stats.t._ppf((1+confidence)/2., n-1)
     return m, m-h, m+h
-def test(n_times,sess,env,estimator)   
+def test(n_times,sess,env,estimator):  
     # for testing
+    '''
     n_lines = []
     n_cleared = []
     total_t = sess.run(tf.contrib.framework.get_global_step())
@@ -193,6 +187,10 @@ def test(n_times,sess,env,estimator)
     print("Mean of line cleared : " + str(m) + ' ' + str(a) + ' ' + str(b))
     print("Mean of line sent : " + str(mean_lines))
     print("Mean of game length : " + str(mean_length))
+    '''
+    return
+
+EpisodeStats = namedtuple("EpisodeStats",["episode_lengths","episode_rewards","episode_line_sent","episode_line_cleared"])
 
 def deep_q_learning(sess,
                     env,
@@ -209,22 +207,18 @@ def deep_q_learning(sess,
                     batch_size=32,
                     record_video_every=50):
     """
-    Q-Learning algorithm for fff-policy TD control using Function Approximation.
+    Q-Learning algorithm for off-policy TD control using Function Approximation.
     Finds the optimal greedy policy while following an epsilon-greedy policy.
 
     Args:
         sess: Tensorflow Session object
-        env: OpenAI environment
-        q_estimator: Estimator object used for the q values
-        target_estimator: Estimator object used for the targets
-        state_processor: A StateProcessor object
+        env: Tetris environment
+        estimator: Estimator object used for the q values
         num_episodes: Number of episodes to run for
         experiment_dir: Directory to save Tensorflow summaries in
         replay_memory_size: Size of the replay memory
         replay_memory_init_size: Number of random experiences to sampel when initializing 
           the reply memory.
-        update_target_estimator_every: Copy parameters from the Q estimator to the 
-          target estimator every N steps
         discount_factor: Lambda time discount factor
         epsilon_start: Chance to sample a random action when taking an action.
           Epsilon is decayed over time and this is the start value
@@ -236,15 +230,18 @@ def deep_q_learning(sess,
     Returns:
         An EpisodeStats object with two numpy arrays for episode_lengths and episode_rewards.
     """
-    Transition = namedtuple("Transition", ["state1","state2", "action", "reward", "next_state1","next_state2", "done"])
-
+    #Transition = namedtuple("Transition", ["state1","state2", "action", "reward", "next_state1","next_state2", "done"])
+    Transition = namedtuple("Transition", ["state1","state2", "reward", "possible_next_state1","posssible_next_state2", "done"])
+    
     # The replay memory
     replay_memory = deque()
 
     # Keeps track of useful statistics
-    stats = plotting.EpisodeStats(
+    stats = EpisodeStats(
         episode_lengths=np.zeros(num_episodes),
-        episode_rewards=np.zeros(num_episodes))
+        episode_rewards=np.zeros(num_episodes),
+        episode_line_sent=np.zeros(num_episodes),
+        episode_line_cleared=np.zeros(num_episodes))
     total_sent = 0
     # Create directories for checkpoints and summaries
     checkpoint_dir = os.path.join(experiment_dir, "checkpoints")
@@ -252,9 +249,6 @@ def deep_q_learning(sess,
 
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
-    if not os.path.exists(monitor_path):
-        os.makedirs(monitor_path)
-
     saver = tf.train.Saver()
     # Load a previous checkpoint if we find one
     latest_checkpoint = tf.train.latest_checkpoint(checkpoint_dir)
@@ -269,22 +263,26 @@ def deep_q_learning(sess,
 
     # The policy we're following
     policy = make_epsilon_greedy_policy(
-        estimator)
+        estimator,discount_factor)
    # Populate the replay memory with initial experience
     print("Populating replay memory...")
     state = env.reset()
     for i in range(replay_memory_init_size):
-        action_probs = policy(sess, state, epsilons[min(total_t, epsilon_decay_steps-1)])
+        print("\r  @ Replay memory {}/{} ".format(i,replay_memory_init_size), end="")
+        sys.stdout.flush()
+        possible_states1,possible_states2,possible_rewards = env.get_all_possible_states()
+        possible_states1,possible_states2,possible_rewards = np.array(possible_states1),np.array(possible_states2), np.array(possible_rewards)
+        action_probs = policy(sess, possible_states1,possible_states2, 
+                              possible_rewards, epsilons[min(total_t, epsilon_decay_steps-1)])
         action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
         next_state, reward, done, _, _ = env.step(action)
-        replay_memory.append(Transition(state[0],state[1], action, reward, next_state[0],next_state[1], done))
+        replay_memory.append(Transition(state[0],state[1],possible_rewards,possible_states1,possible_states2, done))
         if done:
             state = env.reset()
         else:
             state = next_state
 
     for i_episode in range(num_episodes):
-
         # Save the current checkpoint
         if i_episode % 10 == 0:
             saver.save(sess, checkpoint_path)
@@ -312,40 +310,46 @@ def deep_q_learning(sess,
             sys.stdout.flush()
 
             # Take a step
-            action_probs = policy(sess, state, epsilon)
+            possible_states1,possible_states2,possible_rewards = env.get_all_possible_states()
+            possible_states1,possible_states2,possible_rewards = np.array(possible_states1),np.array(possible_states2), np.array(possible_rewards)
+            action_probs = policy(sess, possible_states1,possible_states2, 
+                                  possible_rewards, epsilon)
             action = np.random.choice(np.arange(len(action_probs)), p=action_probs)
-            next_state, reward, done, line_sent, line_cleared = env.step(VALID_ACTIONS[action])
-            #next_state = np.append(state[:,:,1:], np.expand_dims(next_state, 2), axis=2)
+            next_state, reward, done, line_sent, line_cleared = env.step(action)
+            
 
             # If our replay memory is full, pop the first element
             if len(replay_memory) == replay_memory_size:
                 replay_memory.popleft()
 
             # Save transition to replay memory
-            replay_memory.append(Transition(state[0],state[1],action, reward, next_state[0],next_state[1],done))   
+            replay_memory.append(Transition(state[0],state[1],possible_rewards,possible_states1,possible_states2, done))
 
             # Update statistics
-            stats.episode_rewards[i_episode] += reward[action]
+            stats.episode_rewards[i_episode] += reward
             stats.episode_lengths[i_episode] = t
             total_sent += line_sent
             total_cleared += line_cleared
             
             # Sample a minibatch from the replay memory
             samples = random.sample(replay_memory, batch_size)
-            states1_batch,states2_batch, action_batch, reward_batch, next_states1_batch, next_states2_batch,done_batch = map(np.array, zip(*samples))
-
-            # Calculate q values and targets (Double DQN)
-            q_values_next = estimator.predict(sess, next_states1_batch,next_states2_batch)
-            best_actions = np.argmax(q_values_next, axis=1)
-            #targets_batch = reward_batch + np.invert(done_batch).astype(np.float32) * \
-            #    discount_factor * q_values_next_target[np.arange(batch_size), best_actions]
+            target_batch = np.zeros((batch_size,1))
+            state1_batch = []
+            state2_batch = []
+            for idx,sample in enumerate(samples):
+                state1, state2, possible_rewards, possible_states1, possible_states2, done = sample
+                # Calculate values
+                values_next = estimator.predict(sess, possible_states1, possible_states2)[0]
+                values = values_next * discount_factor + possible_rewards
+                best_action = np.argmax(values)
+                target_batch[idx] = values[best_action]
+                state1_batch.append(state1)
+                state2_batch.append(state2)
 
             # Perform gradient descent update
-            states1_batch = np.array(states1_batch)
-            states2_batch = np.array(states2_batch)
-            #reward_batch = np.array(reward_batch)
-            reward_batch = np.vstack(reward_batch)
-            loss = estimator.update(sess, states1_batch,states2_batch, reward_batch)
+            states1_batch = np.array(state1_batch)
+            states2_batch = np.array(state2_batch)
+            loss = estimator.update(sess, states1_batch, states2_batch, target_batch)
 
             if done:
                 break
@@ -358,12 +362,15 @@ def deep_q_learning(sess,
         episode_summary.value.add(simple_value=stats.episode_rewards[i_episode], node_name="episode_reward", tag="episode_reward")
         episode_summary.value.add(simple_value=stats.episode_lengths[i_episode], node_name="episode_length", tag="episode_length")
         episode_summary.value.add(simple_value=total_sent, node_name="episode_line_sent", tag="episode_line_sent")
-        q_estimator.summary_writer.add_summary(episode_summary, total_t)
-        q_estimator.summary_writer.flush()
+        episode_summary.value.add(simple_value=total_cleared, node_name="episode_line_cleared", tag="episode_line_cleared")
+        estimator.summary_writer.add_summary(episode_summary, total_t)
+        estimator.summary_writer.flush()
 
-        yield total_t, plotting.EpisodeStats(
+        yield total_t, EpisodeStats(
             episode_lengths=stats.episode_lengths[:i_episode+1],
-            episode_rewards=stats.episode_rewards[:i_episode+1])
+            episode_rewards=stats.episode_rewards[:i_episode+1],
+            episode_line_sent=stats.episode_line_sent[:i_episode+1],
+            episode_line_cleared=stats.episode_line_cleared[:i_episode+1],)
 
     return stats
 
@@ -388,8 +395,8 @@ with tf.Session() as sess:
                                     estimator=estimator,
                                     experiment_dir=experiment_dir,
                                     num_episodes=100000,
-                                    replay_memory_size=500000,
-                                    replay_memory_init_size=50000,
+                                    replay_memory_size=50000,
+                                    replay_memory_init_size=5000,
                                     update_target_estimator_every=10000,
                                     epsilon_start=1.0,
                                     epsilon_end=0.1,
@@ -397,6 +404,9 @@ with tf.Session() as sess:
                                     discount_factor=0.99,
                                     batch_size=32):
 
-        print("\nEpisode Reward: {}".format(stats.episode_rewards[-1]))
- #       print("\nEpisode Line Sent: {}".format(stats.episode_line_sent[-1]))
+        print("\nEpisode Length, Reward, Line Sent, Line Cleared: {},  {},  {},  {}".format(stats.episode_lengths[-1],
+                                                                             stats.episode_rewards[-1],
+                                                                             stats.episode_line_sent[-1],
+                                                                             stats.episode_line_cleared[-1]))
+
 

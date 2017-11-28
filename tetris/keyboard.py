@@ -2,7 +2,7 @@ import pygame
 from tetris import Tetris
 
 key_actions=['RIGHT','LEFT','DOWN','UP','z','SPACE','LSHIFT']
-delay_time= [ 90,90,100,100,100,400,150]
+delay_time= [ 150,150,200,200,200,400,450]
 class Keyboard:
     def __init__(self):
         self.T = Tetris(action_type = 'single',is_display = True)

@@ -227,6 +227,7 @@ def deep_q_learning(sess,
     replay_memory = []
 
     # Keeps track of useful statistics
+
     stats = plotting.EpisodeStats(
         episode_lengths=np.zeros(num_episodes),
         episode_rewards=np.zeros(num_episodes))
@@ -327,7 +328,7 @@ def deep_q_learning(sess,
             states1_batch,states2_batch, action_batch, reward_batch, next_states1_batch, next_states2_batch,done_batch = map(np.array, zip(*samples))
 
             # Calculate q values and targets (Double DQN)
-            q_values_next = q_estimator.predict(sess, next_states1_batch,next_states2_batch)
+            q_values_next = estimator.predict(sess, next_states1_batch,next_states2_batch)
             best_actions = np.argmax(q_values_next, axis=1)
             q_values_next_target = target_estimator.predict(sess, next_states1_batch,next_states2_batch)
             targets_batch = reward_batch + np.invert(done_batch).astype(np.float32) * \

@@ -71,7 +71,10 @@ class Tetris:
         if self.check_collide(self.piece):
             self.done = True
         if self.done:
-            return self.get_state(),np.full([53],GAME_OVER_REWARD),self.done,0,0
+            if self.use_fitness:
+                return self.get_state(self.grid),np.full([53],GAME_OVER_REWARD),self.done,0,0
+            else:
+                return self.get_state(self.grid),0,self.done,0,0
         self.step_cnt += 1
         if self.action_type == 'grouped':
             return self.groupedAction(action)
@@ -116,7 +119,6 @@ class Tetris:
         return self.get_state(self.grid),reward,self.done,line_sent,line_cleared
     def singleAction(self,actionID):
         #actionlist = ['Right','Left','Down','Rotate','counter_rotate','HardDrop','Hold']
-        line_cleared = 0
         if actionID == 0:
             self.piece = self.moveRight(self.piece)
         elif actionID == 1:
@@ -133,16 +135,19 @@ class Tetris:
             if not self.change:
                 self.change = True
                 self.hold()
+        line_cleared = 0
+        line_sent = 0
         reward = 0
         if self.piece.is_final:
             self.change = False
-            reward,line_cleared = self.check_end()
+            line_sent,line_cleared = self.check_end()
+            reward = line_cleared
             if not self.done:
                 self.newBlock()
         if self.is_display:
             self.display()
         self.prev_action = actionID
-        return self.get_state(self.grid),reward,self.done,reward,line_cleared
+        return self.get_state(self.grid),reward,self.done,line_sent,line_cleared
     def check_collide(self,piece):
         for x in range(4):
             for y in range(4):
@@ -285,9 +290,11 @@ class Tetris:
             self.grid = self.place_piece(self.grid,self.piece)
             tspin = self.check_tspin(self.piece)
             grid = self.grid
+            piece = self.piece
         else:
             grid = self.place_piece(self.grid,oracle_piece)
             tspin = self.check_tspin(oracle_piece)
+            piece = oracle_piece
         ## check line cleared
         total_clear = 0
         grid,total_clear = cal_lines(grid)
@@ -325,8 +332,8 @@ class Tetris:
         ## check end game
         for x in range (4):
             for y in range (4):
-                if self.piece.block[x][y] > 0:
-                    if self.piece.py+y < 0:
+                if piece.block[x][y] > 0:
+                    if piece.py+y < 0:
                         if not is_oracle:
                             self.done = True
                         return 0,0
@@ -394,14 +401,14 @@ class Tetris:
         temp_grid = np.array(grid)
         grid = np.where( temp_grid > 0 ,1,0)
         grid = np.reshape(grid.T,(20,10,1))
-        templist = list(self.nextlist)
+        templist = copy.deepcopy(self.nextlist)
         templist.insert(0,self.piece.b)
         for idx,piece in enumerate(templist):
             if idx == 5 and modify_last_element:
                 X = np.full([7],1/7.0)
             else:
                 num = allpieces.index(piece)
-                X = np.zeros(len(allpieces) + 1)
+                X = np.zeros(len(allpieces))
                 X[num] = 1
             if idx > 0:
                 Y = np.concatenate((Y,X))
@@ -415,7 +422,7 @@ class Tetris:
         self.screen.drawScreen(self.grid,self.piece.px,self.piece.py,hd_piece.px,
                                hd_piece.py,self.piece.block,self.held,self.nextlist,
                                positions,self.totalSent,self.step_cnt,reset=reset)
-    def get_all_possible_state(self): #bfs all possible move
+    def get_all_possible_states(self): #bfs all possible move
         record = self.bfs(self.piece,False)
         flag = False
         if self.held != zeropieces :
@@ -427,41 +434,51 @@ class Tetris:
             b = self.nextlist[0]
             piece = Piece(b,b[0],4,-2)
             record_held = self.bfs(piece,True)
-        state_list = []
+        state1_list = []
+        state2_list = []
         reward_list = []
         self.state_list_actions = []
         next_list,piece_list,piece_backup,held_backup = copy.deepcopy([self.nextlist,self.piecelist,self.piece,self.held]) #backup
         self.newBlock()
         for piece,actions in record:
             temp_grid = self.place_piece(self.grid,piece)
-            state_list.append(self.get_state(temp_grid,True))
-            reward_list.append(self.check_end(True,piece)[0])
+            state1,state2 = self.get_state(temp_grid,True)
+            state1_list.append(state1)
+            state2_list.append(state2)
+            reward_list.append(self.check_end(True,piece)[1])
             self.state_list_actions.append(actions)
         self.hold()
         for piece,actions in record_held:
             temp_grid = self.place_piece(self.grid,piece)
             if flag :
-                state_list.append(self.get_state(temp_grid,False))
+                state1,state2 = self.get_state(temp_grid,False)
+                state1_list.append(state1)
+                state2_list.append(state2)
             else:
-                state_list.append(self.get_state(temp_grid,True))
-            reward_list.append(self.check_end(True,piece)[0])
+                state1,state2 = self.get_state(temp_grid,True)
+                state1_list.append(state1)
+                state2_list.append(state2)
+            reward_list.append(self.check_end(True,piece)[1])
             self.state_list_actions.append(actions)
         self.nextlist,self.piecelist,self.piece,self.held = next_list,piece_list,piece_backup,held_backup #backup
-        return state_list,reward_list
+        return state1_list,state2_list,reward_list
     def test(self):
-        state_list,_ = self.all_possible_state()
-        for grid,Y in state_list:
+        state_list,state2_list,reward_list = self.get_all_possible_states()
+        print(reward_list)
+        for grid,Y,reward in zip(state_list,state2_list,reward_list):
             for i in range(20):
                 for j in range(10):
                     self.grid[j][i] = grid[i][j][0]
                     print(grid[i][j][0],end='')
                 print()
+            print(Y)
+            print("Rewards:",reward)
             self.display()
             import time
             time.sleep(1)
-    def oracle_action(self,actionID):
+    def oracleAction(self,actionID):
         if not self.state_list_actions:
-            print('Please call all_possible_state first')
+            print('Please call get_all_possible_state first')
             exit()
         actions = self.state_list_actions[actionID]
         for action in actions:
@@ -573,7 +590,7 @@ def cal_bumpiness(grid):
 
 
 if __name__ == '__main__':
-    test = 'single'
+    test = 'oracle'
     T = Tetris(action_type = test,use_fitness = False,is_display = True)
     state = T.reset()
     if test == 'single':
@@ -581,21 +598,34 @@ if __name__ == '__main__':
         print(actionlist)
         while True:
             actionID = input('key : ')
-            if actionID not in ['0','1','2','3','4','5','6']:
+            if actionID not in ['0','1','2','3','4','5','6','7']:
                 continue
-            state,reward,done,_,_ = T.step(int(actionID))
-            T.test()
+            if actionID == '7':
+                T.test()
+            else:
+                state,reward,done,_,_ = T.step(int(actionID))
             #print(T.cal_fitness(T.grid))
             #print("Reward: " + str(reward))
             if done:
                 print('Game Over.')
-    else:
+    elif test == 'grouped':
         valid = [ str(x) for x in range(53) ]
         while True:
             actionID = input('key : ')
             if actionID not in valid:
                 continue
-            state,_,done,_ = T.step(int(actionID))
+            state,_,done,_,_ = T.step(int(actionID))
+            T.draw()
+            if done:
+                print('Game Over.')
+    elif test == 'oracle':
+        while True:
+            states,_,_ = T.get_all_possible_states()
+            valid = [ str(x) for x in range(len(states)) ]
+            actionID = input('key : ')
+            if actionID not in valid:
+                continue
+            state,_,done,_,_ = T.step(int(actionID))
             T.draw()
             if done:
                 print('Game Over.')
